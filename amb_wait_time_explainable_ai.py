@@ -1,43 +1,32 @@
 import pandas as pd
 import numpy as np
-from numpy import absolute
-from sklearn.model_selection import train_test_split
-from sklearn.model_selection import cross_val_score
-from sklearn.model_selection import RepeatedKFold
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import GridSearchCV, KFold, RepeatedKFold
 from sklearn.linear_model import Lasso
-from sklearn.model_selection import train_test_split
-from sklearn.model_selection import GridSearchCV, KFold
-from sklearn.metrics import root_mean_squared_error
-from sklearn.metrics import r2_score
+from sklearn.metrics import root_mean_squared_error, r2_score
 from sqlalchemy import create_engine
 import xgboost as xgb
 import matplotlib.pyplot as plt
 import os
 import math
-
+import shap
+import random
 import warnings
 warnings.filterwarnings("ignore")
-
-import sklearn
-print("Scikit-Learn Version : {}".format(sklearn.__version__))
-
-import shap
-from shap import Explanation
-print("SHAP Version : {}".format(shap.__version__))
-
 # JavaScript Important for the interactive charts later on
 shap.initjs()
+#Change working directory to save plots
 os.chdir('C:/Users/obriene/Projects/ED/Ambulance Wait Times Explainable AI/Plots')
 
 #############################################################################
-#Create the engine
+#Create the engines
 cl3_engine = create_engine('mssql+pyodbc://@cl3-data/DataWarehouse?'\
                            'trusted_connection=yes&driver=ODBC+Driver+17'\
                                '+for+SQL+Server')
 realtime_engine = create_engine('mssql+pyodbc://@dwrealtime/RealTimeReporting?'\
                            'trusted_connection=yes&driver=ODBC+Driver+17'\
                                '+for+SQL+Server')
-#sql query
+#sql querys
 att_query = """SET NOCOUNT ON
 SELECT NCAttendanceId AS NCAttendanceID, HospitalNumber, PatientAgeOnArrival, PatientGenderIPM,
        AmbulanceArrivalDateTime, AmbulanceCallSign, IsNewAttendance,
@@ -70,15 +59,16 @@ WHERE Measure_Description = 'In Department'
 AND (Date BETWEEN '01-apr 2023 00:00:00' AND '31-mar-2024 23:59:59')
 ORDER BY date desc"""
 
-#Read query into dataframe
+#Read querys into dataframes
 att_df = pd.read_sql(att_query, cl3_engine)
 loc_df = pd.read_sql(loc_query, cl3_engine)
 occ_df = pd.read_sql(occ_query, realtime_engine).rename(columns={'Data':'EDOccupancy'})
 print('Data read from SQL')
-#Close the connection
+#Close the connections
 cl3_engine.dispose()
 realtime_engine.dispose()
 
+#######################################################################################################
 #Some patients are pre-reg stroke, which means they have an extra event before arriving in an ambulance
 #where they are booked in ahead due to the severity of strokes.  Where this is the first event, we will
 #want to take the event after it for ambulance handover time if that event is 999 Waiting Area.
@@ -108,12 +98,12 @@ df = df.merge(occ_df, on='Date', how='left')
 df = df.sort_values(by='Date')
 df['EDOccupancy'] = df['EDOccupancy'].interpolate(method='linear').round().astype(int)
 df = df.drop('Date', axis=1)
-############################################################################
+##################################################################################################
 #remove outliers
 df = df.loc[((df['AmbHandoverTime'] >= 0) & (df['AmbHandoverTime'] <= 2880))
             & ~(df['NextLocation'].isin(['ED Paeds', 'ED Paediatrics']))].copy()
 #Encode required columns
-df['PatientGenderIPM'] = df['PatientGenderIPM'].str.extract('(\d+)').astype(int)
+df['PatientGenderIPM'] = df['PatientGenderIPM'].str.extract(r'(\d+)').astype(int)
 df['IsNewAttendance'] = np.where(df['IsNewAttendance'] == 'Y', 1, 0)
 df['TriageCategory'] = df['TriageCategory'].fillna(0).astype(int)
 df['ClinicalFrailty'] = (np.where(df['ClinicalFrailtyScore'].str.extract(r'(\d+)').astype(float) >= 5,
@@ -124,6 +114,7 @@ df['NextLocation'] = df['NextLocation'].replace({'ED Ambulatory|ED AMBULATORY' :
                                                  'Majors HOLD|ED Majors Hold|ED Majors' : 2,
                                                  'ED Resus' : 3}, regex=True).fillna(0)
 
+#################################################################################################
 #Split train/test and fit model
 y = df['AmbHandoverTime']
 X = df[['PatientAgeOnArrival', 'PatientGenderIPM', #'AmbulanceArrivalDateTime',
@@ -165,11 +156,11 @@ X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=42, test_
 
 #Fitting the model
 #Grid search for best parameters (this is slow, took around 2 hours).
-#params = {"learning_rate": np.arange(0, 1, 0.05),
+#params = {"learning_rate": np.arange(0, 0.5, 0.05),
  #         "max_depth": np.arange(3, 11, 1),
   #        "min_child_weight": np.arange(0, 11, 1),
-   #       "gamma": np.arange(0.01, 0.04, 0.01),
-    #      "colsample_bytree": np.arange(0.5, 1.01, 0.1)}
+   #       "gamma": np.arange(0, 0.03, 0.01),
+    #      "colsample_bytree": np.arange(0.6, 1.01, 0.1)}
 # Number of Folds and adding the random state for replication
 #kf = KFold(n_splits=5,shuffle=True, random_state=42)
 # Initializing the Model
@@ -199,7 +190,7 @@ print('Testing R2: ' + str(test_R2))
 # evaluate model using RepeatedKFold
 cv = RepeatedKFold(n_splits=10, n_repeats=3, random_state=1)
 scores = cross_val_score(model, X, y, scoring='neg_mean_absolute_error', cv=cv, n_jobs=-1)
-scores = absolute(scores)
+scores = np.absolute(scores)
 print('Mean MAE: %.3f (%.3f)' % (scores.mean(), scores.std()) )
 
 # Check Actual Vs Predictions
@@ -217,14 +208,9 @@ plt.tight_layout()
 plt.savefig('Actual Vs Predicted Ambulance Handover Values.png')
 plt.close()
 
-#create results table
-res = X_test.join(y_test)
-res['Prediction'] = y_pred
-
 # Obtain shap values
 shap_values = shap.Explainer(model).shap_values(X_test)
-# Obtain shap interaction values
-shap_interaction_values = shap.Explainer(model).shap_interaction_values(X_test)
+# Summary - SHAP value bar chart
 shap.summary_plot(shap_values,
                   X_test,
                   plot_type="bar",
@@ -247,24 +233,26 @@ plt.close()
 
 # Now to create a dependence plot for each
 for e, i in enumerate(X_test.columns):
-   shap.dependence_plot(e, shap_values, X_test)
+   shap.dependence_plot(e, shap_values, X_test, show=False)
+   plt.savefig(f'{i} dependence plot.png')
+   plt.close()
 
 # compute SHAP values (different to above)
-explainer2 = shap.Explainer(model, X_train)
-shap_values2 = explainer2(X)
-# idx of value to check
-idx = -3
+train_explainer = shap.Explainer(model, X_train)
+test_explainer = shap.Explainer(model, X_test)
+train_shap_values = train_explainer(X)
 
-#Waterfall plot for id
-fig = plt.figure()
-shap.plots.waterfall(shap_values2[idx], show=False)
-plt.savefig('SHAP waterfall plot2.png', bbox_inches='tight')
-plt.close()
+#Create some waterfall plots for random ids
+for idx in random.sample(X_train.index.tolist(), 10):
+    fig = plt.figure()
+    shap.plots.waterfall(train_shap_values[idx], show=False)
+    plt.savefig(f'SHAP waterfall plot id {str(idx)}.png', bbox_inches='tight')
+    plt.close()
 
-#Force plot for id
-explainer3 = shap.Explainer(model, X_test)
-shap.force_plot(explainer3.expected_value, # base_value i.e. expected value i.e. mean of predictions
+#Force plot for id 0
+idx=0
+shap.force_plot(test_explainer.expected_value, # base_value i.e. expected value i.e. mean of predictions
                 shap_values[idx,:], # shap_values i.e. matrix of SHAP values 
-                X_test.iloc[idx,:], matplotlib=True, show=True) # features i.e. should be the same as shap_values, above
+                X_test.iloc[idx,:], matplotlib=True, show=False) # features i.e. should be the same as shap_values, above
 plt.savefig('SHAP Force Plot.png', bbox_inches='tight')
 plt.close()
