@@ -34,6 +34,9 @@ os.chdir('C:/Users/obriene/Projects/ED/Ambulance Wait Times Explainable AI/Plots
 cl3_engine = create_engine('mssql+pyodbc://@cl3-data/DataWarehouse?'\
                            'trusted_connection=yes&driver=ODBC+Driver+17'\
                                '+for+SQL+Server')
+realtime_engine = create_engine('mssql+pyodbc://@dwrealtime/RealTimeReporting?'\
+                           'trusted_connection=yes&driver=ODBC+Driver+17'\
+                               '+for+SQL+Server')
 #sql query
 att_query = """SET NOCOUNT ON
 SELECT NCAttendanceId AS NCAttendanceID, HospitalNumber, PatientAgeOnArrival, PatientGenderIPM,
@@ -60,20 +63,32 @@ AND (loc.LocationOrder = '1' OR loc.LocationOrder = '2')
 AND (loc.Bed = '999 Waiting Area' OR loc.Bed = 'PRE-REG STROKE')
 """
 
+occ_query = """SET NOCOUNT ON
+SELECT Date, Data
+FROM [RealTimeReporting].[PCM].[operational_dashboard_snapshot]
+WHERE Measure_Description = 'In Department'
+AND (Date BETWEEN '01-apr 2023 00:00:00' AND '31-mar-2024 23:59:59')
+ORDER BY date desc"""
+
 #Read query into dataframe
 att_df = pd.read_sql(att_query, cl3_engine)
 loc_df = pd.read_sql(loc_query, cl3_engine)
+occ_df = pd.read_sql(occ_query, realtime_engine).rename(columns={'Data':'EDOccupancy'})
+print('Data read from SQL')
 #Close the connection
 cl3_engine.dispose()
+realtime_engine.dispose()
 
 #Some patients are pre-reg stroke, which means they have an extra event before arriving in an ambulance
 #where they are booked in ahead due to the severity of strokes.  Where this is the first event, we will
 #want to take the event after it for ambulance handover time if that event is 999 Waiting Area.
 
 #Filter out anywhere that the second event is pre-reg stroke
-filter_loc = loc_df.loc[~((loc_df['Bed'] == 'PRE-REG STROKE') & (loc_df['LocationOrder'] == 2))]
+filter_loc = loc_df.loc[~((loc_df['Bed'] == 'PRE-REG STROKE')
+                          & (loc_df['LocationOrder'] == 2))]
 #Group by incident ID and sum the location order
-sum = filter_loc.groupby('NCAttendanceID', as_index=False)['LocationOrder'].sum().rename(columns={'LocationOrder':'Sum'})
+sum = (filter_loc.groupby('NCAttendanceID', as_index=False)['LocationOrder']
+       .sum().rename(columns={'LocationOrder':'Sum'}))
 #Merge this sum back onto original dataframe
 filter_loc = filter_loc.merge(sum, on='NCAttendanceID')
 #We then only want to keep anywhere where bed is 999 waiting are and the sum is 1 (first location)
@@ -85,6 +100,14 @@ filter_loc = (filter_loc.loc[(filter_loc['Bed'] == '999 Waiting Area')
 
 #Merge this location data onto the attendance data to get full dataframe.
 df = att_df.merge(filter_loc, on='NCAttendanceID', how='inner')
+
+#Get capacity data merged onto df by rounding times to the nearest hour
+df['Date'] = df['AmbulanceArrivalDateTime'].dt.round('H')
+occ_df['Date'] = occ_df['Date'].dt.round('H')
+df = df.merge(occ_df, on='Date', how='left')
+df = df.sort_values(by='Date')
+df['EDOccupancy'] = df['EDOccupancy'].interpolate(method='linear').round().astype(int)
+df = df.drop('Date', axis=1)
 ############################################################################
 #remove outliers
 df = df.loc[((df['AmbHandoverTime'] >= 0) & (df['AmbHandoverTime'] <= 2880))
@@ -105,7 +128,7 @@ df['NextLocation'] = df['NextLocation'].replace({'ED Ambulatory|ED AMBULATORY' :
 y = df['AmbHandoverTime']
 X = df[['PatientAgeOnArrival', 'PatientGenderIPM', #'AmbulanceArrivalDateTime',
         'IsNewAttendance', 'IsInjury', 'TriageCategory', 'NextLocation', 'ClinicalFrailty',
-        'MentalHealth', 'Admitted']]
+        'MentalHealth', 'Admitted', 'EDOccupancy']]
 
 #Feature selection
 # parameters to be tested on GridSearchCV
@@ -136,7 +159,7 @@ plt.savefig('Lasso Feature Selection.png')
 plt.close()
 
 # Subsetting the features which has more than 15 importance.
-feature_subset=np.array(X.columns)[lasso1_coef>15]
+feature_subset = np.array(X.columns)[lasso1_coef>15]
 X = X[feature_subset].copy()
 X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=42, test_size=0.25)
 
@@ -222,36 +245,26 @@ shap.summary_plot(shap_values,
 plt.savefig('SHAP interaction values violin.png')
 plt.close()
 
-# Now to create a dependence plot for each...
-# Remember - Y-axis - is SHAP value for respective feature value
-# X-axis - is the freature's value#for e, i in enumerate(X_test.columns):
-#   shap.dependence_plot(e, shap_values, X_test)
-# compute SHAP values
-# when variable `shap_values` was created above it used slightly different params...
-# shap_values = shap.Explainer(model).shap_values(X_test)
+# Now to create a dependence plot for each
+for e, i in enumerate(X_test.columns):
+   shap.dependence_plot(e, shap_values, X_test)
+
+# compute SHAP values (different to above)
 explainer2 = shap.Explainer(model, X_train)
 shap_values2 = explainer2(X)
 # idx of value to check
-idx = 0
+idx = -3
 
 #Waterfall plot for id
 fig = plt.figure()
 shap.plots.waterfall(shap_values2[idx], show=False)
-plt.savefig('SHAP waterfall plot.png', bbox_inches='tight')
+plt.savefig('SHAP waterfall plot2.png', bbox_inches='tight')
 plt.close()
 
 #Force plot for id
-# See how the predicted value above compares to average predicted value below
-# Inspecting a single record using `shap.force_plot`
-e = shap.Explainer(model, X_test)
-shap.force_plot(e.expected_value, # base_value i.e. expected value i.e. mean of predictions
+explainer3 = shap.Explainer(model, X_test)
+shap.force_plot(explainer3.expected_value, # base_value i.e. expected value i.e. mean of predictions
                 shap_values[idx,:], # shap_values i.e. matrix of SHAP values 
                 X_test.iloc[idx,:], matplotlib=True, show=True) # features i.e. should be the same as shap_values, above
 plt.savefig('SHAP Force Plot.png', bbox_inches='tight')
 plt.close()
-
-# Multiple values
-# Interactive plot with 2 different drop downs - left and top
-#shap.force_plot(e.expected_value,
- #               shap_values,
-  #              X_test, show=True)
