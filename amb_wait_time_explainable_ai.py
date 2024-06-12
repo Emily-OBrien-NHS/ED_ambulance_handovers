@@ -256,3 +256,26 @@ shap.force_plot(test_explainer.expected_value, # base_value i.e. expected value 
                 X_test.iloc[idx,:], matplotlib=True, show=False) # features i.e. should be the same as shap_values, above
 plt.savefig('SHAP Force Plot.png', bbox_inches='tight')
 plt.close()
+
+#Code to get average difference in ambulance wait time for each variable
+df = X_train.join(pd.DataFrame(train_shap_values.values,
+                               columns=['SHAP_' + col for col in X_train.columns]))
+
+outputs = []
+for col in X_train.columns:
+    temp = df[[col, 'SHAP_'+col]]
+    temp = temp.groupby(col, as_index=False).mean()
+    temp['column'] = col
+    outputs += temp.values.tolist()
+
+output_df = pd.DataFrame(outputs, columns=['Value', 'Average Difference',
+                                           'Feature'])[['Feature', 'Value', 'Average Difference']]
+
+
+all_scenarios = (df.drop_duplicates(subset=[col for col in df.columns if 'SHAP' in col])
+                 .sort_values(by=['Admitted', 'IsInjury', 'MentalHealth', 'ClinicalFrailty', 'NextLocation'])
+                 .set_index(['Admitted', 'IsInjury', 'MentalHealth', 'ClinicalFrailty', 'NextLocation']))
+
+#with pd.ExcelWriter('Difference in wait times by feature values.xlsx') as writer:
+ #   output_df.to_excel(writer, sheet_name='Average SHAP', index=False)
+  #  all_scenarios.to_excel(writer, sheet_name='All Scnarios')
