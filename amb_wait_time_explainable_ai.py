@@ -290,7 +290,7 @@ results = pd.DataFrame(data={'Pre MRU':results[0], 'Post MRU':results[1]},
                        index=['Train RMSE', 'Test RMSE', 'Train R2', 'Test R2',
                               'MAE', 'MAE std'],
                        columns=['Pre MRU', 'Post MRU'])
-results.to_excel('Comparisons/model results')
+results.to_excel('Comparisons/model results.xlsx')
 
 #Data cleaning to make comparison plots
 #Add column of pre/post MRU
