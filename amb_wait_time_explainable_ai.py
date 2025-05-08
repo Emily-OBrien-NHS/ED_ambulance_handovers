@@ -17,7 +17,7 @@ warnings.filterwarnings("ignore")
 # JavaScript Important for the interactive charts later on
 shap.initjs()
 #Change working directory to save plots
-os.chdir('C:/Users/obriene/Projects/ED/Ambulance Wait Times Explainable AI/Plots')
+os.chdir('C:/Users/obriene/Projects/General Analysis/ED/Ambulance Wait Times Explainable AI/Plots/Plots')
 
 #############################################################################
 #Create the engines
